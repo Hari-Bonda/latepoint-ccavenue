@@ -29,7 +29,7 @@ if ( ! class_exists( 'LatePointPaymentsCcavenue' ) ) :
 		 * Addon version.
 		 *
 		 */
-		public $version = '1.0.0';
+		public $version = '1.0.2';
 		public $db_version = '1.0.0';
 		public $addon_name = 'latepoint-ccavenue';
 
@@ -258,7 +258,54 @@ if ( ! class_exists( 'LatePointPaymentsCcavenue' ) ) :
 		}
 
 		public function latepoint_init() {
-            // Nothing needed here for now
+            // Restore session if returning from payment gateway with intent key
+            $order_intent_key = isset( $_REQUEST['latepoint_order_intent_key'] ) ? $_REQUEST['latepoint_order_intent_key'] : false;
+            $booking_id_passed = isset( $_REQUEST['latepoint_booking_id'] ) ? $_REQUEST['latepoint_booking_id'] : false;
+
+            if ( $order_intent_key ) {
+                $order_intent = OsOrderIntentHelper::get_order_intent_by_intent_key( $order_intent_key );
+                if ( $order_intent && ! $order_intent->is_new_record() ) {
+                    // If booking ID is passed, we are in confirmation mode.
+                    // Just set the booking object so verification steps pass, but DO NOT restore the cart
+                    // because restoring the cart triggers the "Booking in Progress" form flow.
+                    // Smartly Determine State
+                    // If Intent is converted to Order -> Show Confirmation
+                    // If Intent is new/processing/failed -> Show Form (Restore Cart)
+                    
+                    if ( $order_intent->is_converted() ) {
+                        // Success: Confirmation Mode
+                        $booking = new OsBookingModel($order_intent->booking_id); 
+                        if ( $booking->id ) {
+                            OsStepsHelper::set_booking_object($booking);
+                            // Also restore customer for context
+                            $customer = new OsCustomerModel($booking->customer_id);
+                            if($customer->id) OsStepsHelper::$customer_object = $customer;
+                        }
+                    } else {
+                         // Pending/Failed State: Retry Mode
+                         // Restore Cart to allow retry
+                        $booking = new OsBookingModel($order_intent->booking_id);
+                        if ( $booking->id ) {
+                            OsStepsHelper::$cart_object = new OsCartModel();
+                            OsStepsHelper::$cart_object->items = []; 
+                            OsStepsHelper::$cart_object->add_item( $booking );
+                            OsStepsHelper::$cart_object->set_payment_method( $this->processor_code );
+                            
+                            $customer = new OsCustomerModel($booking->customer_id);
+                            if($customer->id) OsStepsHelper::$customer_object = $customer;
+                            
+                            // Check for error message passed from controller
+                            if ( isset( $_REQUEST['message'] ) && ! empty( $_REQUEST['message'] ) ) {
+                                $booking->add_error( 'payment_error', urldecode( $_REQUEST['message'] ) );
+                            } else {
+                                $booking->add_error( 'payment_error', __( 'Payment failed or was cancelled.', 'latepoint-ccavenue' ) );
+                            }
+
+                            OsStepsHelper::set_booking_object($booking);
+                        }
+                    }
+                }
+            }
 		}
 
 
@@ -296,6 +343,13 @@ if ( ! class_exists( 'LatePointPaymentsCcavenue' ) ) :
 					'jquery',
 					'latepoint-main-front'
 				), $this->version );
+				
+				// Bypass potentially broken localization by adding inline script directly
+				$data_script = "window.latepoint_ccavenue_data = " . json_encode([
+					'ajaxurl' => admin_url( 'admin-ajax.php' ),
+					'is_active' => true
+				]) . ";";
+				wp_add_inline_script( 'latepoint-payments-ccavenue-front', $data_script, 'before' );
 			}
 
 		}
